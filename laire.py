@@ -42,48 +42,62 @@ if visao_selecionada == "Comparativo YoY (25 vs 26)":
     st.title("Análise de Desempenho Real: 2025 vs 2026")
     
     try:
-        # LÊ APENAS O ARQUIVO DE PRODUTOS
         df_prod = pd.read_csv('faturamento_laire_comparativo.csv')
+        df_fat = pd.read_csv('faturamento_laire_total.csv')
     except FileNotFoundError:
-        st.error("Arquivo não encontrado! Verifique se 'faturamento_laire_comparativo.csv' está na pasta.")
+        st.error("Arquivos não encontrados! Verifique se 'faturamento_laire_comparativo.csv' e 'faturamento_laire_total.csv' estão na pasta.")
         st.stop()
 
+    # --- LIMPEZA DOS DADOS DO FATURAMENTO ---
+    # Limpa as linhas de total geradas pelo SQL
+    df_fat = df_fat[~df_fat['NOME_LOJA'].astype(str).str.contains(">> TOTAL", na=False)].copy()
+    
+    # Converte os anos para números para poder separar 2025 de 2026
+    df_fat['ANO'] = pd.to_numeric(df_fat['ANO'], errors='coerce')
+    df_fat['VALOR_LIQUIDO'] = pd.to_numeric(df_fat['VALOR_LIQUIDO'], errors='coerce').fillna(0)
+
+    # Separa o faturamento por ano e depois junta tudo lado a lado
+    fat_2025 = df_fat[df_fat['ANO'] == 2025].groupby(['COD_LOJA', 'NOME_LOJA'])['VALOR_LIQUIDO'].sum().reset_index()
+    fat_2025.rename(columns={'VALOR_LIQUIDO': 'Valor Ano Anterior'}, inplace=True)
+
+    fat_2026 = df_fat[df_fat['ANO'] == 2026].groupby(['COD_LOJA', 'NOME_LOJA'])['VALOR_LIQUIDO'].sum().reset_index()
+    fat_2026.rename(columns={'VALOR_LIQUIDO': 'Valor Atual'}, inplace=True)
+
+    # Junta 2025 e 2026 na mesma tabela de faturamento
+    df_fat_final = pd.merge(fat_2025, fat_2026, on=['COD_LOJA', 'NOME_LOJA'], how='outer').fillna(0)
+
+    # --- LIMPEZA DOS DADOS DE PRODUTOS ---
     PROD_COL_ANT = 'Valor Ano Ant' if 'Valor Ano Ant' in df_prod.columns else 'Valor Ano Anterior'
     PROD_COL_ATUAL = 'Valor Atual'
 
     for col in ['Qtd Ano Ant', PROD_COL_ANT, 'Qtd Atual', PROD_COL_ATUAL]:
         if col in df_prod.columns: df_prod[col] = pd.to_numeric(df_prod[col], errors='coerce').fillna(0)
 
-    # Limpeza brutal de linhas duplicadas (Subtotais e Resumos que vêm do SQL)
     df_prod = df_prod[
-        (~df_prod['NOME_PRODUTO'].astype(str).str.contains("SUBTOTAL", na=False)) & 
-        (~df_prod['NOME_LOJA'].astype(str).str.contains("TOTAL", na=False)) &
-        (~df_prod['NOME_LOJA'].astype(str).str.contains("RESUMO", na=False))
+        (~df_prod['NOME_PRODUTO'].astype(str).str.contains("SUBTOTAL", na=False, case=False)) & 
+        (~df_prod['NOME_LOJA'].astype(str).str.contains("TOTAL", na=False, case=False)) &
+        (~df_prod['NOME_LOJA'].astype(str).str.contains("RESUMO", na=False, case=False))
     ].copy()
 
-    # O PYTHON GERA A TABELA DE FATURAMENTO AUTOMATICAMENTE AQUI
-    df_fat = df_prod.groupby(['COD_LOJA', 'NOME_LOJA'])[[PROD_COL_ANT, PROD_COL_ATUAL]].sum().reset_index()
-
-    # Filtro Dinâmico de Cidade (se existir no arquivo)
+    # Filtro Dinâmico de Cidade
     if 'CIDADE_LOJA' in df_prod.columns:
         cidades_validas = df_prod[~df_prod['CIDADE_LOJA'].isin(['---', 'NÃO INFORMADA'])]['CIDADE_LOJA'].dropna().unique().tolist()
         if len(cidades_validas) > 0:
             cidade_selecionada = st.selectbox("📍 Filtrar Análise por Cidade:", ["Todas as Cidades"] + sorted(cidades_validas))
             if cidade_selecionada != "Todas as Cidades":
                 df_prod = df_prod[df_prod['CIDADE_LOJA'] == cidade_selecionada]
-                df_fat = df_fat[df_fat['NOME_LOJA'].isin(df_prod['NOME_LOJA'].unique())]
+                df_fat_final = df_fat_final[df_fat_final['NOME_LOJA'].isin(df_prod['NOME_LOJA'].unique())]
 
     # Aplica matemática inteligente
-    df_fat['Variacao (%)'] = df_fat.apply(lambda row: calcular_variacao_inteligente(row[PROD_COL_ANT], row[PROD_COL_ATUAL]), axis=1)
+    df_fat_final['Variacao (%)'] = df_fat_final.apply(lambda row: calcular_variacao_inteligente(row['Valor Ano Anterior'], row['Valor Atual']), axis=1)
     df_prod['Variacao (%)'] = df_prod.apply(lambda row: calcular_variacao_inteligente(row[PROD_COL_ANT], row[PROD_COL_ATUAL]), axis=1)
 
-    # Limpa código de produto
     if 'COD_PRODUTO' in df_prod.columns:
         df_prod['COD_PRODUTO'] = df_prod['COD_PRODUTO'].fillna("").astype(str).apply(lambda x: x.replace('.0', '') if x.endswith('.0') else x)
 
     # CÁLCULO TOTAL DOS CARDS
-    total_2025 = df_fat[PROD_COL_ANT].sum()
-    total_2026 = df_fat[PROD_COL_ATUAL].sum()
+    total_2025 = df_fat_final['Valor Ano Anterior'].sum()
+    total_2026 = df_fat_final['Valor Atual'].sum()
     variacao_real = calcular_variacao_inteligente(total_2025, total_2026)
 
     st.info("Insight Baseado em Dados: Os indicadores refletem a consolidação real extraída da base (devoluções são exibidas como valores negativos).")
@@ -120,8 +134,8 @@ if visao_selecionada == "Comparativo YoY (25 vs 26)":
     tab1, tab2 = st.tabs(["Resumo por Loja", "Detalhamento por Produto"])
 
     with tab1:
-        formato_fat = {PROD_COL_ANT: "R$ {:,.2f}", PROD_COL_ATUAL: "R$ {:,.2f}", "Variacao (%)": "{:.2f}%"}
-        st.dataframe(df_fat.style.map(cor_variacao, subset=['Variacao (%)']).format(formato_fat), use_container_width=True, height=400)
+        formato_fat = {"Valor Ano Anterior": "R$ {:,.2f}", "Valor Atual": "R$ {:,.2f}", "Variacao (%)": "{:.2f}%"}
+        st.dataframe(df_fat_final.style.map(cor_variacao, subset=['Variacao (%)']).format(formato_fat), use_container_width=True, height=400)
 
     with tab2:
         formato_prod = {"Qtd Ano Ant": "{:,.2f}", PROD_COL_ANT: "R$ {:,.2f}", "Qtd Atual": "{:,.2f}", PROD_COL_ATUAL: "R$ {:,.2f}", "Variacao (%)": "{:.2f}%"}
@@ -139,10 +153,10 @@ elif visao_selecionada == "Evolução Mensal (2025/2026)":
         st.error("Arquivo não encontrado! Verifique se 'faturamento_laire_2025-6.csv' está na pasta.")
         st.stop()
 
+    df_fat_mes['MES'] = pd.to_numeric(df_fat_mes['MES'], errors='coerce')
     df_fat_mes = df_fat_mes.dropna(subset=['MES'])
-    df_fat_mes = df_fat_mes[~df_fat_mes['CLIENTE'].astype(str).str.contains("TOTAL GERAL", na=False)]
+    df_fat_mes['MES'] = df_fat_mes['MES'].astype(int)
 
-    df_fat_mes['MES'] = pd.to_numeric(df_fat_mes['MES'], errors='coerce').fillna(0).astype(int)
     if 'VALOR_FATURADO' in df_fat_mes.columns:
         df_fat_mes['VALOR_FATURADO'] = pd.to_numeric(df_fat_mes['VALOR_FATURADO'], errors='coerce').fillna(0)
 
